@@ -10,10 +10,13 @@ use tracing::debug;
 use super::download::ActionCache;
 use super::metadata::ActionMetadata;
 use crate::docker::resources::JobDockerResources;
-use crate::job::execute::{JobState, StepConclusion, StepResult, build_step_env, run_process};
+use crate::job::execute::{
+    JobState, StepConclusion, StepResult, build_step_env, run_process, write_script_file,
+};
 use crate::job::expression::ExprContext;
 use crate::job::logs::LogSender;
 use crate::job::schema::{Evaluable, Step};
+use crate::job::shell::Shell;
 use crate::job::workspace::Workspace;
 use crate::node::NodeRuntimes;
 
@@ -238,64 +241,90 @@ async fn run_nested_script(
         .and_then(|v| v.as_str())
         .map(|d| crate::job::expression::resolve_template(d, &script_ctx));
 
-    // Container mode: run inline via docker exec
-    if let Some(resources) = docker_resources.filter(|r| r.job_container_id().is_some()) {
-        let container_id = resources
-            .job_container_id()
-            .context("no job container for composite script step")?;
+    let job_container = docker_resources.filter(|r| r.job_container_id().is_some());
+    let fallback = job_container.map_or("bash", |r| r.default_shell());
+    let shell = Shell::resolve(explicit_shell, fallback)?;
+    let script_file = write_script_file(workspace, &shell, &resolved_script)?;
 
-        let working_dir = match &raw_workdir {
-            Some(d) if d.starts_with('/') => d.clone(),
-            Some(d) if d != "." => format!("/github/workspace/{d}"),
-            _ => "/github/workspace".into(),
-        };
-
-        return crate::docker::exec::docker_exec(
-            resources.docker(),
-            container_id,
-            vec![
-                explicit_shell.unwrap_or(resources.default_shell()).into(),
-                "-e".into(),
-                "-c".into(),
-                resolved_script,
-            ],
-            &step_env,
-            &working_dir,
-            job_state,
-            log_sender,
-            timeout,
-            cancel_token,
-            job_state.debug_enabled,
-        )
-        .await;
-    }
-
-    // Host mode
-    let working_dir = match &raw_workdir {
-        Some(d) if d != "." => workspace.workspace_dir().join(d),
-        _ => workspace.workspace_dir().to_path_buf(),
+    let result = match job_container {
+        Some(resources) => {
+            run_script_in_container(
+                resources,
+                &shell,
+                &script_file,
+                raw_workdir.as_deref(),
+                job_state,
+                &step_env,
+                log_sender,
+                timeout,
+                cancel_token,
+            )
+            .await
+        }
+        None => {
+            let working_dir = match &raw_workdir {
+                Some(d) if d != "." => workspace.workspace_dir().join(d),
+                _ => workspace.workspace_dir().to_path_buf(),
+            };
+            let argv = shell.command(&script_file.to_string_lossy());
+            let (program, args) = argv.split_first().context("shell command is empty")?;
+            let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+            run_process(
+                program,
+                &args,
+                &step_env,
+                &working_dir,
+                job_state,
+                log_sender,
+                timeout,
+                cancel_token,
+            )
+            .await
+        }
     };
 
-    let script_file = workspace
-        .runner_temp()
-        .join(format!("_composite_step_{}.sh", uuid::Uuid::new_v4()));
-    std::fs::write(&script_file, &resolved_script)
-        .with_context(|| format!("writing composite script to {}", script_file.display()))?;
+    let _ = std::fs::remove_file(&script_file);
+    result
+}
 
-    let result = run_process(
-        explicit_shell.unwrap_or("bash"),
-        &[OsStr::new("-e"), script_file.as_os_str()],
-        &step_env,
+#[allow(clippy::too_many_arguments)]
+async fn run_script_in_container(
+    resources: &JobDockerResources,
+    shell: &Shell,
+    script_file: &Path,
+    raw_workdir: Option<&str>,
+    job_state: &mut JobState,
+    env: &HashMap<String, String>,
+    log_sender: &LogSender,
+    timeout: Duration,
+    cancel_token: &CancellationToken,
+) -> Result<StepResult> {
+    let container_id = resources
+        .job_container_id()
+        .context("no job container for composite script step")?;
+    let container_script_path = resources
+        .remap_to_container_path(script_file)
+        .context("composite script file is outside the container mounts")?;
+
+    let working_dir = match raw_workdir {
+        Some(d) if d.starts_with('/') => d.to_string(),
+        Some(d) if d != "." => format!("/github/workspace/{d}"),
+        _ => "/github/workspace".into(),
+    };
+
+    crate::docker::exec::docker_exec(
+        resources.docker(),
+        container_id,
+        shell.command(&container_script_path),
+        env,
         &working_dir,
         job_state,
         log_sender,
         timeout,
         cancel_token,
+        job_state.debug_enabled,
     )
-    .await;
-
-    let _ = std::fs::remove_file(&script_file);
-    result
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]

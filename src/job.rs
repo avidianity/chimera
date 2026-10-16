@@ -9,6 +9,7 @@ pub mod manifest;
 pub mod masker;
 pub mod output;
 pub mod schema;
+pub mod shell;
 pub mod timeline;
 pub mod workspace;
 

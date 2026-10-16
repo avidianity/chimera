@@ -288,6 +288,13 @@ pub fn script_step_in_dir(id: &str, script: &str, dir: &str) -> serde_json::Valu
     step
 }
 
+/// A `run:` step with a `shell:`, which reaches the runner as the step input `shell`.
+pub fn script_step_with_shell(id: &str, script: &str, shell: &str) -> serde_json::Value {
+    let mut step = script_step(id, script);
+    step["inputs"]["shell"] = serde_json::json!(shell);
+    step
+}
+
 pub fn script_step_continue(id: &str, script: &str) -> serde_json::Value {
     let mut step = script_step(id, script);
     step["continueOnError"] = serde_json::json!(true);

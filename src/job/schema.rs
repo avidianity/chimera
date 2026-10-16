@@ -259,6 +259,15 @@ impl JobManifest {
             .filter(|dir| !dir.is_empty())
     }
 
+    /// `defaults.run.shell`, applied to every `run:` step that does not set its own.
+    pub fn default_shell(&self) -> Option<&str> {
+        self.defaults
+            .get("run")?
+            .get("shell")
+            .map(String::as_str)
+            .filter(|shell| !shell.is_empty())
+    }
+
     pub fn results_endpoint(&self) -> Option<&str> {
         self.variables
             .get("system.github.results_endpoint")

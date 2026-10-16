@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +21,7 @@ use super::live_feed::FeedSender;
 use super::logs::{JobLogger, LogLine, LogSender, StepLogger};
 use super::masker::SecretMasker;
 use super::schema::{Evaluable, JobManifest, Step};
+use super::shell::Shell;
 use super::timeline::{TimelineLogRef, TimelineRecord, TimelineResult, TimelineState};
 use super::workspace::Workspace;
 use crate::docker::container::{JobContainerSpec, ServiceContainerSpec};
@@ -62,6 +63,8 @@ pub struct JobState {
     /// `defaults.run.working-directory` for the job, used by any `run:` step that
     /// does not set its own.
     pub default_working_directory: Option<String>,
+    /// `defaults.run.shell` for the job, used by any `run:` step that does not set its own.
+    pub default_shell: Option<String>,
     /// Whether `::debug::` workflow commands should be emitted to the log stream.
     /// Only true when the `ACTIONS_STEP_DEBUG` secret is set to `"true"`.
     pub debug_enabled: bool,
@@ -88,6 +91,7 @@ impl JobState {
             context_data,
             host_workspace: None,
             default_working_directory: None,
+            default_shell: None,
             debug_enabled,
         }
     }
@@ -117,6 +121,24 @@ fn step_working_directory(
         true => None,
         false => Some(trimmed.to_string()),
     }
+}
+
+/// The step's `shell:`, else the job's `defaults.run.shell`, else `fallback`.
+fn step_shell(step: &Step, job_state: &JobState, fallback: &str) -> Result<Shell> {
+    let requested = step
+        .inputs
+        .get("shell")
+        .or(job_state.default_shell.as_ref());
+    Shell::resolve(requested.map(String::as_str), fallback)
+}
+
+/// Write a `run:` script to the runner temp dir, which job containers also mount.
+pub fn write_script_file(workspace: &Workspace, shell: &Shell, script: &str) -> Result<PathBuf> {
+    let file_name = format!("{}{}", uuid::Uuid::new_v4(), shell.extension());
+    let script_file = workspace.runner_temp().join(file_name);
+    std::fs::write(&script_file, shell.prepare_script(script))
+        .with_context(|| format!("writing script file {}", script_file.display()))?;
+    Ok(script_file)
 }
 
 /// Build the `job` context object for expression evaluation.
@@ -282,9 +304,8 @@ pub async fn run_host_step(
     let expr_ctx = ExprContext::new(&env, job_state, false, false);
     let script = super::expression::resolve_template(script_raw, &expr_ctx);
 
-    let script_file = workspace.runner_temp().join(format!("step_{}.sh", step.id));
-    std::fs::write(&script_file, &script)
-        .with_context(|| format!("writing script file {}", script_file.display()))?;
+    let shell = step_shell(step, job_state, "bash")?;
+    let script_file = write_script_file(workspace, &shell, &script)?;
     let timeout = step.timeout();
 
     debug!(
@@ -299,9 +320,12 @@ pub async fn run_host_step(
         None => workspace.workspace_dir().to_path_buf(),
     };
 
+    let argv = shell.command(&script_file.to_string_lossy());
+    let (program, args) = argv.split_first().context("shell command is empty")?;
+    let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
     let result = run_process(
-        "bash",
-        &[OsStr::new("-e"), script_file.as_os_str()],
+        program,
+        &args,
         &env,
         &working_dir,
         job_state,
@@ -350,6 +374,12 @@ pub async fn run_container_step(
         .job_container_id()
         .context("no job container for container step")?;
 
+    let shell = step_shell(step, job_state, docker_resources.default_shell())?;
+    let script_file = write_script_file(workspace, &shell, &script)?;
+    let container_script_path = docker_resources
+        .remap_to_container_path(&script_file)
+        .context("script file is outside the container mounts")?;
+
     debug!(
         step_id = %step.id,
         step_name = %step.display_name,
@@ -366,12 +396,7 @@ pub async fn run_container_step(
     let result = crate::docker::exec::docker_exec(
         docker_resources.docker(),
         container_id,
-        vec![
-            docker_resources.default_shell().into(),
-            "-e".into(),
-            "-c".into(),
-            script,
-        ],
+        shell.command(&container_script_path),
         &env,
         &working_dir,
         job_state,
@@ -392,6 +417,7 @@ pub async fn run_container_step(
             .extend(unnamed_state);
     }
 
+    let _ = std::fs::remove_file(&script_file);
     result
 }
 
@@ -655,6 +681,7 @@ pub async fn run_all_steps(
     }
 
     job_state.default_working_directory = manifest.default_working_directory().map(str::to_string);
+    job_state.default_shell = manifest.default_shell().map(str::to_string);
 
     let job_env: HashMap<String, String> = {
         let ctx = ExprContext::new(base_env, &job_state, false, false);

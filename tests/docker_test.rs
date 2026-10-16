@@ -149,6 +149,32 @@ async fn container_mode_runs_scripts_with_sh_when_image_has_no_bash() {
 
 #[tokio::test]
 #[ignore]
+async fn container_mode_honours_step_shell() {
+    let env = TestEnv::setup().await;
+    let job_spec = JobContainerSpec {
+        image: "ubuntu:latest".into(),
+        environment: HashMap::new(),
+        ports: vec![],
+        volumes: vec![],
+        options: None,
+        credentials: None,
+    };
+
+    let mut resources = setup_docker(&env.tmp, &env.workspace, Some(&job_spec), &[]).await;
+
+    // Explicit bash turns on pipefail, so the failing first stage fails the step.
+    let manifest = manifest_with_steps(
+        vec![script_step_with_shell("s1", "false | true", "bash")],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run_with_docker(&manifest, &resources).await.unwrap();
+    resources.cleanup().await;
+
+    assert_eq!(conclusion, JobConclusion::Failed);
+}
+
+#[tokio::test]
+#[ignore]
 async fn container_mode_job_context() {
     let env = TestEnv::setup().await;
     let job_spec = JobContainerSpec {
