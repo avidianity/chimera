@@ -124,6 +124,31 @@ async fn container_mode_mounts_host_docker_socket() {
 
 #[tokio::test]
 #[ignore]
+async fn container_mode_runs_scripts_with_sh_when_image_has_no_bash() {
+    let env = TestEnv::setup().await;
+    let job_spec = JobContainerSpec {
+        image: "docker:cli".into(),
+        environment: HashMap::new(),
+        ports: vec![],
+        volumes: vec![],
+        options: None,
+        credentials: None,
+    };
+
+    let mut resources = setup_docker(&env.tmp, &env.workspace, Some(&job_spec), &[]).await;
+
+    let manifest = manifest_with_steps(
+        vec![script_step("s1", "docker version")],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run_with_docker(&manifest, &resources).await.unwrap();
+    resources.cleanup().await;
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+#[tokio::test]
+#[ignore]
 async fn container_mode_job_context() {
     let env = TestEnv::setup().await;
     let job_spec = JobContainerSpec {

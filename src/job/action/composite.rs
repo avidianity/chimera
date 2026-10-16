@@ -215,10 +215,7 @@ async fn run_nested_script(
         .and_then(|v| v.as_str())
         .context("composite step 'run' is not a string")?;
 
-    let shell = step_map
-        .get(ykey("shell"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("bash");
+    let explicit_shell = step_map.get(ykey("shell")).and_then(|v| v.as_str());
 
     let mut step_env = env.clone();
     if let Some(serde_yaml::Value::Mapping(env_map)) = step_map.get(ykey("env")) {
@@ -256,7 +253,12 @@ async fn run_nested_script(
         return crate::docker::exec::docker_exec(
             resources.docker(),
             container_id,
-            vec![shell.into(), "-e".into(), "-c".into(), resolved_script],
+            vec![
+                explicit_shell.unwrap_or(resources.default_shell()).into(),
+                "-e".into(),
+                "-c".into(),
+                resolved_script,
+            ],
             &step_env,
             &working_dir,
             job_state,
@@ -281,7 +283,7 @@ async fn run_nested_script(
         .with_context(|| format!("writing composite script to {}", script_file.display()))?;
 
     let result = run_process(
-        shell,
+        explicit_shell.unwrap_or("bash"),
         &[OsStr::new("-e"), script_file.as_os_str()],
         &step_env,
         &working_dir,

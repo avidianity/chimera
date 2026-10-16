@@ -366,7 +366,12 @@ pub async fn run_container_step(
     let result = crate::docker::exec::docker_exec(
         docker_resources.docker(),
         container_id,
-        vec!["bash".into(), "-e".into(), "-c".into(), script],
+        vec![
+            docker_resources.default_shell().into(),
+            "-e".into(),
+            "-c".into(),
+            script,
+        ],
         &env,
         &working_dir,
         job_state,

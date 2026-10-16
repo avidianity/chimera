@@ -59,6 +59,8 @@ pub struct JobDockerResources {
     host_gateway_ip: Option<String>,
     /// Default environment from the job container's Docker image (ENV directives).
     image_env: HashMap<String, String>,
+    /// Shell for `run:` steps without an explicit `shell:` in the job container.
+    default_shell: &'static str,
 }
 
 impl JobDockerResources {
@@ -75,6 +77,7 @@ impl JobDockerResources {
             node_container_paths: std::collections::BTreeMap::new(),
             host_gateway_ip: None,
             image_env: HashMap::new(),
+            default_shell: "bash",
         }
     }
 
@@ -328,6 +331,9 @@ impl JobDockerResources {
                 "job container started"
             );
 
+            let bash_probe = exec_as_root(&self.docker, &container.id, bash_probe_command()).await;
+            self.default_shell = shell_from_bash_probe(bash_probe);
+
             // Store path mappings for host→container remapping
             self.path_mappings = vec![
                 (
@@ -425,6 +431,12 @@ impl JobDockerResources {
         &self.image_env
     }
 
+    /// Shell for `run:` steps that don't name one: bash when the image has it, sh
+    /// otherwise, as the official runner does.
+    pub fn default_shell(&self) -> &'static str {
+        self.default_shell
+    }
+
     /// Remap a host path to its container-internal equivalent using bind mount mappings.
     pub fn remap_to_container_path(&self, host_path: &Path) -> Option<String> {
         for (host_prefix, container_prefix) in &self.path_mappings {
@@ -500,6 +512,23 @@ async fn exec_as_root(docker: &Docker, container_id: &str, cmd: Vec<String>) -> 
         .await
         .context("inspecting exec")?;
     inspect.exit_code.context("exec has no exit code")
+}
+
+fn bash_probe_command() -> Vec<String> {
+    ["sh", "-c", "command -v bash"].map(String::from).to_vec()
+}
+
+fn shell_from_bash_probe(probe: Result<i64>) -> &'static str {
+    match probe {
+        Ok(0) => "bash",
+        Ok(_) => "sh",
+        // An image without even `sh` can't run a script step either way; keep bash
+        // so the step fails with an error that names the missing shell.
+        Err(e) => {
+            warn!(error = %e, "could not probe job container for bash");
+            "bash"
+        }
+    }
 }
 
 /// Stop a container (SIGTERM -> timeout -> SIGKILL) and remove it with volumes.

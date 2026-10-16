@@ -299,3 +299,18 @@ async fn cleanup_purges_files_the_host_cannot_delete() {
     assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
     assert_eq!(std::fs::read_dir(&runner_temp).unwrap().count(), 0);
 }
+
+#[test]
+fn bash_probe_success_selects_bash() {
+    assert_eq!(shell_from_bash_probe(Ok(0)), "bash");
+}
+
+#[test]
+fn bash_probe_miss_falls_back_to_sh() {
+    assert_eq!(shell_from_bash_probe(Ok(1)), "sh");
+}
+
+#[test]
+fn bash_probe_error_keeps_bash() {
+    assert_eq!(shell_from_bash_probe(Err(anyhow::anyhow!("no sh"))), "bash");
+}
