@@ -18,6 +18,8 @@ pub(crate) struct ContainerOptions {
     pub memory: Option<i64>,
     pub nano_cpus: Option<i64>,
     pub user: Option<String>,
+    /// `-v`/`--volume` mounts, in the same `[source:]target[:mode]` form as `volumes:`.
+    pub volumes: Vec<String>,
 }
 
 impl ContainerOptions {
@@ -139,13 +141,26 @@ pub(crate) fn parse_options(options: Option<&str>) -> ContainerOptions {
                     opts.user = Some(val);
                 }
             }
-            other => {
-                warn!(option = other, "ignoring unrecognized container option");
+            "--volume" | "-v" => {
+                if let Some(val) = next_token(&tokens, &mut i) {
+                    opts.volumes.push(val);
+                }
             }
+            other => match inline_volume(other) {
+                Some(volume) => opts.volumes.push(volume.to_string()),
+                None => warn!(option = other, "ignoring unrecognized container option"),
+            },
         }
         i += 1;
     }
     opts
+}
+
+/// The value of a `--volume=…` or `-v=…` token.
+fn inline_volume(token: &str) -> Option<&str> {
+    token
+        .strip_prefix("--volume=")
+        .or_else(|| token.strip_prefix("-v="))
 }
 
 /// Consume the next token as a flag value, advancing `i`.

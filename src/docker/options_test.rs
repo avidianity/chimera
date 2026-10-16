@@ -234,3 +234,27 @@ fn apply_to_host_config_all_fields() {
     assert_eq!(hc.memory, Some(512 * 1024 * 1024));
     assert_eq!(hc.nano_cpus, Some(2_000_000_000));
 }
+
+#[test]
+fn volume_flags() {
+    let opts = parse_options(Some(
+        "-v /a:/a --volume /b:/b:ro -v=/c:/c --volume=/d:/d --memory 1g",
+    ));
+
+    assert_eq!(opts.volumes, ["/a:/a", "/b:/b:ro", "/c:/c", "/d:/d"]);
+    assert_eq!(opts.memory, Some(1024 * 1024 * 1024));
+}
+
+#[test]
+fn quoted_volume() {
+    let opts = parse_options(Some(r#"-v "/my dir:/data""#));
+
+    assert_eq!(opts.volumes, ["/my dir:/data"]);
+}
+
+#[test]
+fn volume_flag_without_value_is_ignored() {
+    let opts = parse_options(Some("-v"));
+
+    assert!(opts.volumes.is_empty());
+}

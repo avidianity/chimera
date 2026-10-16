@@ -111,6 +111,7 @@ impl JobDockerResources {
                 .collect();
 
             let opts = parse_options(svc.options.as_deref());
+            let binds = without_duplicates(svc.volumes.iter().chain(&opts.volumes).cloned());
             let mut host_config = HostConfig {
                 network_mode: Some(network_name.clone()),
                 port_bindings: if port_bindings.is_empty() {
@@ -118,11 +119,7 @@ impl JobDockerResources {
                 } else {
                     Some(port_bindings)
                 },
-                binds: if svc.volumes.is_empty() {
-                    None
-                } else {
-                    Some(svc.volumes.clone())
-                },
+                binds: (!binds.is_empty()).then_some(binds),
                 security_opt: Some(vec!["no-new-privileges:true".into()]),
                 ..Default::default()
             };
@@ -263,12 +260,17 @@ impl JobDockerResources {
             ));
             self.node_container_paths = runtimes.remapped("/github/externals");
 
+            let opts = parse_options(spec.options.as_deref());
+            let user_volumes: Vec<String> =
+                spec.volumes.iter().chain(&opts.volumes).cloned().collect();
+
             // Workflows written for the official runner often mount the socket
             // themselves; Docker rejects a second mount at the same path.
-            if !mounts_container_path(&spec.volumes, CONTAINER_SOCKET_PATH) {
+            if !mounts_container_path(&user_volumes, CONTAINER_SOCKET_PATH) {
                 binds.push(socket_bind());
             }
-            binds.extend(spec.volumes.clone());
+            binds.extend(user_volumes);
+            let binds = without_duplicates(binds);
 
             let env_list: Vec<String> = spec
                 .environment
@@ -278,7 +280,6 @@ impl JobDockerResources {
 
             let port_bindings = parse_port_bindings(&spec.ports);
 
-            let opts = parse_options(spec.options.as_deref());
             let mut host_config = HostConfig {
                 network_mode: Some(network_name.clone()),
                 binds: Some(binds),
@@ -516,6 +517,16 @@ async fn exec_as_root(docker: &Docker, container_id: &str, cmd: Vec<String>) -> 
         .await
         .context("inspecting exec")?;
     inspect.exit_code.context("exec has no exit code")
+}
+
+/// The docker CLI merges identical `-v` flags, which workflows written for the
+/// official runner rely on; the API rejects them as duplicate mount points.
+fn without_duplicates(binds: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    binds
+        .into_iter()
+        .filter(|bind| seen.insert(bind.clone()))
+        .collect()
 }
 
 /// Whether any `volumes:` entry (`[source:]target[:mode]`) mounts at `path`.

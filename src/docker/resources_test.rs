@@ -342,3 +342,17 @@ fn mounts_container_path_ignores_matching_source_only() {
 
     assert!(!mounts_container_path(&volumes, "/var/run/docker.sock"));
 }
+
+#[test]
+fn without_duplicates_keeps_first_occurrence_in_order() {
+    let binds = ["/a:/a", "/b:/b", "/a:/a"].map(String::from);
+
+    assert_eq!(without_duplicates(binds), ["/a:/a", "/b:/b"]);
+}
+
+#[test]
+fn without_duplicates_keeps_distinct_modes() {
+    let binds = ["/a:/a", "/a:/a:ro"].map(String::from);
+
+    assert_eq!(without_duplicates(binds).len(), 2);
+}
