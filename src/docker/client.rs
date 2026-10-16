@@ -18,6 +18,24 @@ pub fn connect(socket: Option<&str>) -> Result<Docker> {
     Ok(docker)
 }
 
+const CONTAINER_SOCKET_PATH: &str = "/var/run/docker.sock";
+
+/// Bind mount that exposes the host's Docker daemon inside job and action
+/// containers, as the official runner does, so steps can run `docker build`.
+pub fn socket_bind() -> String {
+    let docker_host = std::env::var("DOCKER_HOST").ok();
+    format!(
+        "{}:{CONTAINER_SOCKET_PATH}",
+        host_socket_path(docker_host.as_deref())
+    )
+}
+
+fn host_socket_path(docker_host: Option<&str>) -> &str {
+    docker_host
+        .and_then(|host| host.strip_prefix("unix://"))
+        .unwrap_or(CONTAINER_SOCKET_PATH)
+}
+
 /// Verify the Docker daemon is reachable.
 pub async fn ping(docker: &Docker) -> Result<()> {
     docker.ping().await.context("pinging Docker daemon")?;
@@ -140,6 +158,27 @@ mod tests {
         assert_eq!(
             parse_image_ref("localhost:5000/image"),
             ("localhost:5000/image", "latest")
+        );
+    }
+
+    #[test]
+    fn host_socket_defaults_without_docker_host() {
+        assert_eq!(host_socket_path(None), "/var/run/docker.sock");
+    }
+
+    #[test]
+    fn host_socket_follows_unix_docker_host() {
+        assert_eq!(
+            host_socket_path(Some("unix:///run/user/1000/docker.sock")),
+            "/run/user/1000/docker.sock"
+        );
+    }
+
+    #[test]
+    fn host_socket_defaults_for_tcp_docker_host() {
+        assert_eq!(
+            host_socket_path(Some("tcp://127.0.0.1:2375")),
+            "/var/run/docker.sock"
         );
     }
 

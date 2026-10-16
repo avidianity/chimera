@@ -247,6 +247,7 @@ impl JobDockerResources {
                 temp_mount,
                 actions_mount,
                 tool_cache_mount,
+                super::client::socket_bind(),
             ];
 
             // Ensure the Linux node binaries are available and mount them into the

@@ -99,6 +99,31 @@ async fn container_mode_workspace_mounted() {
 
 #[tokio::test]
 #[ignore]
+async fn container_mode_mounts_host_docker_socket() {
+    let env = TestEnv::setup().await;
+    let job_spec = JobContainerSpec {
+        image: "ubuntu:latest".into(),
+        environment: HashMap::new(),
+        ports: vec![],
+        volumes: vec![],
+        options: None,
+        credentials: None,
+    };
+
+    let mut resources = setup_docker(&env.tmp, &env.workspace, Some(&job_spec), &[]).await;
+
+    let manifest = manifest_with_steps(
+        vec![script_step("s1", "test -S /var/run/docker.sock")],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run_with_docker(&manifest, &resources).await.unwrap();
+    resources.cleanup().await;
+
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+#[tokio::test]
+#[ignore]
 async fn container_mode_job_context() {
     let env = TestEnv::setup().await;
     let job_spec = JobContainerSpec {
@@ -231,6 +256,35 @@ async fn inline_docker_alpine_echo() {
             },
             "inputs": {
                 "args": "echo hello from docker action"
+            },
+            "condition": null,
+            "timeoutInMinutes": null,
+            "continueOnError": false,
+            "order": 1,
+            "environment": null,
+            "contextName": "s1"
+        })],
+        &env.mock_server.uri(),
+    );
+    let (conclusion, _) = env.run(&manifest).await.unwrap();
+    assert_eq!(conclusion, JobConclusion::Succeeded);
+}
+
+#[tokio::test]
+#[ignore]
+async fn inline_docker_reaches_host_docker_daemon() {
+    let env = TestEnv::setup().await;
+    let manifest = manifest_with_steps(
+        vec![serde_json::json!({
+            "id": "s1",
+            "displayName": "Docker CLI version",
+            "reference": {
+                "name": "docker://docker:cli",
+                "type": "containerregistry",
+                "image": "docker:cli"
+            },
+            "inputs": {
+                "args": "docker version"
             },
             "condition": null,
             "timeoutInMinutes": null,

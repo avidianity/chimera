@@ -355,6 +355,7 @@ fn build_bind_mounts(workspace: &Workspace, action_dir: Option<&Path>) -> Result
         format!("{}:/github/workspace", workspace_dir.display()),
         format!("{}:/github/workflow", workflow_files.display()),
         format!("{}:/github/runner_temp", workspace.runner_temp().display()),
+        crate::docker::client::socket_bind(),
     ];
 
     if let Some(dir) = action_dir {
