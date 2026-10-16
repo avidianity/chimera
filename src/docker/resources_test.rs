@@ -314,3 +314,31 @@ fn bash_probe_miss_falls_back_to_sh() {
 fn bash_probe_error_keeps_bash() {
     assert_eq!(shell_from_bash_probe(Err(anyhow::anyhow!("no sh"))), "bash");
 }
+
+#[test]
+fn mounts_container_path_matches_bind_target() {
+    let volumes = vec!["/var/run/docker.sock:/var/run/docker.sock".to_string()];
+
+    assert!(mounts_container_path(&volumes, "/var/run/docker.sock"));
+}
+
+#[test]
+fn mounts_container_path_matches_target_with_mode() {
+    let volumes = vec!["/run/user/1000/docker.sock:/var/run/docker.sock:ro".to_string()];
+
+    assert!(mounts_container_path(&volumes, "/var/run/docker.sock"));
+}
+
+#[test]
+fn mounts_container_path_matches_anonymous_volume() {
+    let volumes = vec!["/var/run/docker.sock".to_string()];
+
+    assert!(mounts_container_path(&volumes, "/var/run/docker.sock"));
+}
+
+#[test]
+fn mounts_container_path_ignores_matching_source_only() {
+    let volumes = vec!["/var/run/docker.sock:/tmp/docker.sock".to_string()];
+
+    assert!(!mounts_container_path(&volumes, "/var/run/docker.sock"));
+}

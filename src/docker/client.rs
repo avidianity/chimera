@@ -18,7 +18,7 @@ pub fn connect(socket: Option<&str>) -> Result<Docker> {
     Ok(docker)
 }
 
-const CONTAINER_SOCKET_PATH: &str = "/var/run/docker.sock";
+pub const CONTAINER_SOCKET_PATH: &str = "/var/run/docker.sock";
 
 /// Bind mount that exposes the host's Docker daemon inside job and action
 /// containers, as the official runner does, so steps can run `docker build`.

@@ -13,7 +13,7 @@ use bollard::models::{EndpointSettings, HealthStatusEnum, HostConfig, PortBindin
 use futures::StreamExt;
 use tracing::{debug, error, info, warn};
 
-use super::client::ensure_image;
+use super::client::{CONTAINER_SOCKET_PATH, ensure_image, socket_bind};
 use super::container::{JobContainerSpec, ServiceContainerSpec};
 use super::network::{create_job_network, get_network_gateway, remove_network};
 use super::options::parse_options;
@@ -250,7 +250,6 @@ impl JobDockerResources {
                 temp_mount,
                 actions_mount,
                 tool_cache_mount,
-                super::client::socket_bind(),
             ];
 
             // Ensure the Linux node binaries are available and mount them into the
@@ -264,6 +263,11 @@ impl JobDockerResources {
             ));
             self.node_container_paths = runtimes.remapped("/github/externals");
 
+            // Workflows written for the official runner often mount the socket
+            // themselves; Docker rejects a second mount at the same path.
+            if !mounts_container_path(&spec.volumes, CONTAINER_SOCKET_PATH) {
+                binds.push(socket_bind());
+            }
             binds.extend(spec.volumes.clone());
 
             let env_list: Vec<String> = spec
@@ -512,6 +516,15 @@ async fn exec_as_root(docker: &Docker, container_id: &str, cmd: Vec<String>) -> 
         .await
         .context("inspecting exec")?;
     inspect.exit_code.context("exec has no exit code")
+}
+
+/// Whether any `volumes:` entry (`[source:]target[:mode]`) mounts at `path`.
+fn mounts_container_path(volumes: &[String], path: &str) -> bool {
+    volumes.iter().any(|volume| {
+        let mut parts = volume.split(':');
+        let first = parts.next();
+        parts.next().or(first) == Some(path)
+    })
 }
 
 fn bash_probe_command() -> Vec<String> {
