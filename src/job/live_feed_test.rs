@@ -182,3 +182,16 @@ fn send_batch_chunks_at_100_lines() {
         assert_eq!(p2["StartLine"], 101);
     });
 }
+
+#[tokio::test(start_paused = true)]
+async fn send_batch_gives_up_on_a_stalled_connection() {
+    use futures::channel::mpsc as futures_mpsc;
+
+    // A receiver that never reads: the first message fills the channel, the next one stalls.
+    let (mut tx, _rx) = futures_mpsc::channel::<tokio_tungstenite::tungstenite::Message>(0);
+    let lines: Vec<String> = (0..300).map(|i| format!("line {i}")).collect();
+
+    let sent = send_batch(&mut tx, "step-1", &lines, 0).await;
+
+    assert!(!sent);
+}

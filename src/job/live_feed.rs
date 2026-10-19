@@ -5,6 +5,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
+const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A line to be sent to the live console feed, tagged with a step ID.
 struct FeedLine {
     step_id: String,
@@ -202,14 +204,21 @@ where
         });
         offset += chunk.len() as i64;
 
-        if let Err(e) = ws_sink
-            .send(tokio_tungstenite::tungstenite::Message::Text(
-                msg.to_string().into(),
-            ))
-            .await
-        {
-            debug!(error = %e, "live console feed send failed");
-            return false;
+        // A stalled connection would block the send until TCP gives up, and the full
+        // line channel would then block the step's output.
+        let send = ws_sink.send(tokio_tungstenite::tungstenite::Message::Text(
+            msg.to_string().into(),
+        ));
+        match tokio::time::timeout(SEND_TIMEOUT, send).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                debug!(error = %e, "live console feed send failed");
+                return false;
+            }
+            Err(_) => {
+                debug!("live console feed send timed out");
+                return false;
+            }
         }
     }
     true
