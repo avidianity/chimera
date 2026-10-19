@@ -65,6 +65,7 @@ jobs:
           path: |
             chimera-${{ matrix.target }}.tar.gz
             chimera-${{ matrix.target }}.tar.gz.sha256
+          retention-days: 1
 
   release:
     name: Create Release
