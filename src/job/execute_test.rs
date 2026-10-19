@@ -154,6 +154,38 @@ async fn nonzero_exit_returns_failed() {
     drop(logger);
 }
 
+#[tokio::test]
+async fn background_process_holding_output_does_not_hold_the_step() {
+    let (_tmp, ws, client, _mock) = setup_execute().await;
+    let masks = SecretMasker::default();
+    let logger = StepLogger::legacy(client, "plan", "step", masks, None).await;
+
+    let step = make_step("1", "sleep 30 &\necho started");
+    let mut state = JobState::new(
+        SecretMasker::default(),
+        HashMap::new(),
+        serde_json::json!({}),
+    );
+    let base_env = HashMap::new();
+
+    let start = std::time::Instant::now();
+    let result = run_host_step(
+        &step,
+        &mut state,
+        &ws,
+        &base_env,
+        logger.sender(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert!(start.elapsed().as_secs() < 10);
+    assert_eq!(result.conclusion, StepConclusion::Succeeded);
+
+    drop(logger);
+}
+
 fn unsecure_commands_env() -> HashMap<String, String> {
     HashMap::from([(ALLOW_UNSECURE_COMMANDS_ENV.to_string(), "true".to_string())])
 }

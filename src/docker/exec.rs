@@ -5,13 +5,15 @@ use anyhow::{Context, Result};
 use bollard::Docker;
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::output::process_docker_output;
 use crate::job::commands::CommandPolicy;
-use crate::job::execute::{JobState, StepConclusion, StepResult};
+use crate::job::execute::{JobState, OUTPUT_DRAIN_GRACE, StepConclusion, StepResult};
 use crate::job::logs::LogSender;
 use crate::job::output::OutputProcessor;
+
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Run a command inside a running container via `docker exec`.
 ///
@@ -69,7 +71,26 @@ pub async fn docker_exec(
     });
     let stream_abort = stream_task.abort_handle();
 
-    let timed_stream = tokio::time::timeout(timeout, stream_task);
+    // The stream stays open while any process holds the exec's output, including a
+    // background process the step left behind, so the exec's exit also ends the step.
+    let finished = async {
+        let mut stream_task = stream_task;
+        tokio::select! {
+            result = &mut stream_task => result,
+            () = wait_for_exit(docker, &exec.id) => {
+                match tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut stream_task).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("step exited but a process it started still holds its output, detaching");
+                        stream_task.abort();
+                        Ok(())
+                    }
+                }
+            }
+        }
+    };
+
+    let timed_stream = tokio::time::timeout(timeout, finished);
 
     let result = tokio::select! {
         timeout_result = timed_stream => {
@@ -113,6 +134,18 @@ pub async fn docker_exec(
     };
 
     Ok(StepResult { conclusion })
+}
+
+/// Resolves once the exec's main process has exited.
+async fn wait_for_exit(docker: &Docker, exec_id: &str) {
+    loop {
+        match docker.inspect_exec(exec_id).await {
+            Ok(inspect) if inspect.running == Some(false) => return,
+            Ok(_) => {}
+            Err(e) => debug!(error = %e, "inspecting docker exec failed"),
+        }
+        tokio::time::sleep(EXIT_POLL_INTERVAL).await;
+    }
 }
 
 #[cfg(test)]

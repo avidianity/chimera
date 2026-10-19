@@ -30,6 +30,9 @@ use crate::job::output::OutputProcessor;
 use crate::node::NodeRuntimes;
 use crate::utils::{format_results_timestamp, format_timeline_timestamp};
 
+/// How long a step's output may stay open after its process exits.
+pub(crate) const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
 /// Per-step result for `steps.<id>.outcome` and `steps.<id>.conclusion`.
 ///
 /// `outcome` is the raw result before `continue-on-error` is applied.
@@ -461,11 +464,9 @@ pub async fn run_process(
     let stderr_task = spawn_output_reader(stderr, processor.clone());
 
     let timed_wait = async {
-        let (stdout_result, stderr_result, wait_result) =
-            tokio::join!(stdout_task, stderr_task, child.wait());
-        stdout_result.context("stdout task panicked")?;
-        stderr_result.context("stderr task panicked")?;
-        wait_result.context("waiting for child process")
+        let status = child.wait().await.context("waiting for child process")?;
+        drain_output(stdout_task, stderr_task).await?;
+        Ok::<_, anyhow::Error>(status)
     };
 
     let status = tokio::select! {
@@ -499,6 +500,31 @@ pub async fn run_process(
     };
 
     Ok(StepResult { conclusion })
+}
+
+/// Waits for the output readers to reach EOF once the step's process has exited.
+///
+/// A background process the step started inherits its stdout and stderr, and keeps
+/// them open for as long as it runs. Waiting for EOF alone would hold the step until
+/// that process exits or the step times out, so the wait gives up after a grace period.
+async fn drain_output(
+    stdout_task: tokio::task::JoinHandle<()>,
+    stderr_task: tokio::task::JoinHandle<()>,
+) -> Result<()> {
+    let aborts = [stdout_task.abort_handle(), stderr_task.abort_handle()];
+    let readers = async { tokio::join!(stdout_task, stderr_task) };
+    let Ok((stdout_result, stderr_result)) =
+        tokio::time::timeout(OUTPUT_DRAIN_GRACE, readers).await
+    else {
+        warn!("step exited but a process it started still holds its output, detaching");
+        for abort in aborts {
+            abort.abort();
+        }
+        return Ok(());
+    };
+    stdout_result.context("stdout task panicked")?;
+    stderr_result.context("stderr task panicked")?;
+    Ok(())
 }
 
 async fn kill_process_group(child: &mut tokio::process::Child) {
