@@ -9,6 +9,8 @@ use serde::de::Deserializer;
 pub struct ActionMetadata {
     #[serde(default)]
     pub inputs: HashMap<String, ActionInput>,
+    #[serde(default)]
+    pub outputs: HashMap<String, ActionOutput>,
     pub runs: ActionRuns,
 }
 
@@ -16,6 +18,14 @@ pub struct ActionMetadata {
 pub struct ActionInput {
     #[serde(default)]
     pub default: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ActionOutput {
+    /// Only a composite action maps an output to a value. Other actions set their
+    /// outputs at runtime and declare them here for documentation only.
+    #[serde(default)]
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

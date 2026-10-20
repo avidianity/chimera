@@ -11,7 +11,8 @@ use super::download::ActionCache;
 use super::metadata::ActionMetadata;
 use crate::docker::resources::JobDockerResources;
 use crate::job::execute::{
-    JobState, StepConclusion, StepResult, build_step_env, run_process, write_script_file,
+    JobState, StepConclusion, StepOutcome, StepResult, build_step_env, run_process,
+    write_script_file,
 };
 use crate::job::expression::ExprContext;
 use crate::job::logs::LogSender;
@@ -115,91 +116,214 @@ async fn run_composite_action_inner(
 
     let timeout = step.timeout();
 
-    for (i, nested_step) in steps.iter().enumerate() {
-        let nested_obj = nested_step
-            .as_mapping()
-            .context("composite step is not a mapping")?;
+    // Like on the official runner, a composite action has its own `steps` context:
+    // sub-steps see only each other, and the caller sees only the action's
+    // `outputs:`. The caller's context comes back even when a sub-step errors.
+    let caller_step_outputs = std::mem::take(&mut job_state.step_outputs);
+    let caller_step_outcomes = std::mem::take(&mut job_state.step_outcomes);
 
-        // Rebuild env each iteration so PATH/env changes from previous sub-steps
-        // (via ::add-path::, GITHUB_PATH, ::set-env::, GITHUB_ENV) are picked up.
-        let mut composite_env = build_step_env(step, job_state, workspace, base_env);
-        composite_env.extend(action_inputs.clone());
-        composite_env.insert("GITHUB_ACTION_PATH".into(), action_path.clone());
+    let result: Result<StepResult> = async {
+        for (i, nested_step) in steps.iter().enumerate() {
+            let nested_obj = nested_step
+                .as_mapping()
+                .context("composite step is not a mapping")?;
+            let nested_id = nested_obj.get(ykey("id")).and_then(|v| v.as_str());
 
-        // Evaluate `if:` condition — skip the step if it evaluates to false
-        if let Some(condition) = nested_obj.get(ykey("if")).and_then(|v| v.as_str()) {
-            let cond_ctx = ExprContext::new(&composite_env, job_state, false, false);
-            if !crate::job::expression::evaluate_condition(Some(condition), &cond_ctx) {
-                debug!(
-                    composite_step = i,
-                    condition, "skipping composite sub-step (condition not met)"
-                );
-                continue;
+            // Rebuild env each iteration so PATH/env changes from previous sub-steps
+            // (via ::add-path::, GITHUB_PATH, ::set-env::, GITHUB_ENV) are picked up.
+            let composite_env = sub_step_env(
+                step,
+                job_state,
+                workspace,
+                base_env,
+                &action_inputs,
+                &action_path,
+            );
+
+            // Evaluate `if:` condition — skip the step if it evaluates to false
+            if let Some(condition) = nested_obj.get(ykey("if")).and_then(|v| v.as_str()) {
+                let cond_ctx = ExprContext::new(&composite_env, job_state, false, false);
+                if !crate::job::expression::evaluate_condition(Some(condition), &cond_ctx) {
+                    debug!(
+                        composite_step = i,
+                        condition, "skipping composite sub-step (condition not met)"
+                    );
+                    if let Some(id) = nested_id {
+                        job_state
+                            .step_outcomes
+                            .insert(id.to_string(), skipped_outcome());
+                    }
+                    continue;
+                }
             }
-        }
 
-        debug!(
-            composite_step = i,
-            action_dir = %action_dir.display(),
-            "running composite sub-step"
-        );
+            debug!(
+                composite_step = i,
+                action_dir = %action_dir.display(),
+                "running composite sub-step"
+            );
 
-        let result = if nested_obj.contains_key(ykey("uses")) {
-            run_nested_action(
-                nested_obj,
-                job_state,
-                workspace,
-                &composite_env,
-                log_sender,
-                action_cache,
-                access_token,
-                timeout,
-                depth,
-                cancel_token,
-                docker_resources,
-                node_runtimes,
-            )
-            .await?
-        } else if nested_obj.contains_key(ykey("run")) {
-            run_nested_script(
-                nested_obj,
-                job_state,
-                workspace,
-                &composite_env,
-                log_sender,
-                timeout,
-                cancel_token,
-                docker_resources,
-            )
-            .await?
-        } else {
-            log_sender
-                .send(format!(
-                    "Skipping composite step {i}: no 'run' or 'uses' key"
-                ))
-                .await;
-            continue;
-        };
+            let result = if nested_obj.contains_key(ykey("uses")) {
+                run_nested_action(
+                    nested_obj,
+                    job_state,
+                    workspace,
+                    &composite_env,
+                    log_sender,
+                    action_cache,
+                    access_token,
+                    timeout,
+                    depth,
+                    cancel_token,
+                    docker_resources,
+                    node_runtimes,
+                )
+                .await?
+            } else if nested_obj.contains_key(ykey("run")) {
+                run_nested_script(
+                    nested_obj,
+                    job_state,
+                    workspace,
+                    &composite_env,
+                    log_sender,
+                    timeout,
+                    cancel_token,
+                    docker_resources,
+                )
+                .await?
+            } else {
+                log_sender
+                    .send(format!(
+                        "Skipping composite step {i}: no 'run' or 'uses' key"
+                    ))
+                    .await;
+                continue;
+            };
 
-        if result.conclusion == StepConclusion::Cancelled {
-            return Ok(result);
-        }
-
-        if result.conclusion == StepConclusion::Failed {
             let continue_on_error = nested_obj
                 .get(ykey("continue-on-error"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            if !continue_on_error {
+            let outputs = take_sub_step_file_commands(job_state, workspace);
+            if let Some(id) = nested_id {
+                record_sub_step(job_state, id, outputs, result.conclusion, continue_on_error);
+            }
+
+            if result.conclusion == StepConclusion::Cancelled {
+                return Ok(result);
+            }
+
+            if result.conclusion == StepConclusion::Failed && !continue_on_error {
                 return Ok(result);
             }
         }
+
+        Ok(StepResult {
+            conclusion: StepConclusion::Succeeded,
+        })
+    }
+    .await;
+
+    let output_env = sub_step_env(
+        step,
+        job_state,
+        workspace,
+        base_env,
+        &action_inputs,
+        &action_path,
+    );
+    job_state.outputs = evaluate_action_outputs(metadata, &output_env, job_state);
+    job_state.step_outputs = caller_step_outputs;
+    job_state.step_outcomes = caller_step_outcomes;
+
+    result
+}
+
+fn sub_step_env(
+    step: &Step,
+    job_state: &JobState,
+    workspace: &Workspace,
+    base_env: &HashMap<String, String>,
+    action_inputs: &HashMap<String, String>,
+    action_path: &str,
+) -> HashMap<String, String> {
+    let mut env = build_step_env(step, job_state, workspace, base_env);
+    env.extend(action_inputs.clone());
+    env.insert("GITHUB_ACTION_PATH".into(), action_path.to_string());
+    env
+}
+
+/// Apply what a sub-step wrote to GITHUB_OUTPUT, GITHUB_ENV and GITHUB_PATH before
+/// the next sub-step starts, as the official runner does after every step, and
+/// return the sub-step's outputs.
+fn take_sub_step_file_commands(
+    job_state: &mut JobState,
+    workspace: &Workspace,
+) -> HashMap<String, String> {
+    let mut outputs = std::mem::take(&mut job_state.outputs);
+    if let Ok(file_outputs) = workspace.read_output_file() {
+        outputs.extend(file_outputs);
+    }
+    if let Ok(file_env) = workspace.read_env_file() {
+        job_state.env.extend(file_env);
+    }
+    if let Ok(extra_paths) = workspace.read_path_file() {
+        job_state.path_prepends.extend(extra_paths);
+    }
+    workspace.clear_sub_step_files();
+    outputs
+}
+
+fn record_sub_step(
+    job_state: &mut JobState,
+    id: &str,
+    outputs: HashMap<String, String>,
+    conclusion: StepConclusion,
+    continue_on_error: bool,
+) {
+    if !outputs.is_empty() {
+        job_state.step_outputs.insert(id.to_string(), outputs);
     }
 
-    Ok(StepResult {
-        conclusion: StepConclusion::Succeeded,
-    })
+    let effective_conclusion = if continue_on_error && conclusion == StepConclusion::Failed {
+        StepConclusion::Succeeded
+    } else {
+        conclusion
+    };
+    job_state.step_outcomes.insert(
+        id.to_string(),
+        StepOutcome {
+            outcome: conclusion.as_str().to_string(),
+            conclusion: effective_conclusion.as_str().to_string(),
+        },
+    );
+}
+
+fn skipped_outcome() -> StepOutcome {
+    StepOutcome {
+        outcome: "skipped".into(),
+        conclusion: "skipped".into(),
+    }
+}
+
+/// Resolve the action's `outputs:` mapping against its own `steps` context. These
+/// are the only outputs the caller sees as `steps.<action id>.outputs`.
+fn evaluate_action_outputs(
+    metadata: &ActionMetadata,
+    env: &HashMap<String, String>,
+    job_state: &JobState,
+) -> HashMap<String, String> {
+    let ctx = ExprContext::new(env, job_state, false, false);
+    metadata
+        .outputs
+        .iter()
+        .filter_map(|(name, output)| {
+            let value = output.value.as_deref()?;
+            let resolved = crate::job::expression::resolve_template(value, &ctx);
+            Some((name.clone(), resolved))
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]

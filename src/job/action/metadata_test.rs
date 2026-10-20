@@ -213,6 +213,38 @@ runs:
 }
 
 #[test]
+fn composite_outputs_map_to_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("action.yml"),
+        r#"
+name: 'Composite With Outputs'
+outputs:
+  cache-hit:
+    description: 'Whether the cache was hit'
+    value: ${{ steps.load.outputs.cache-hit }}
+  documented-only:
+    description: 'No value, like a node action output'
+runs:
+  using: 'composite'
+  steps:
+    - id: load
+      run: echo "cache-hit=true" >> "$GITHUB_OUTPUT"
+      shell: bash
+"#,
+    )
+    .unwrap();
+
+    let metadata = load_action_metadata(tmp.path()).unwrap();
+
+    assert_eq!(
+        metadata.outputs["cache-hit"].value.as_deref(),
+        Some("${{ steps.load.outputs.cache-hit }}")
+    );
+    assert!(metadata.outputs["documented-only"].value.is_none());
+}
+
+#[test]
 fn pre_and_post_scripts() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
