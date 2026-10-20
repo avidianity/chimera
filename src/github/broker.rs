@@ -14,6 +14,10 @@ use super::auth::TokenManager;
 
 const BROKER_PROTOCOL_VERSION: &str = "3.0.0";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a `/message` long poll may stay open. The broker holds the request open
+/// for longer than a regular request when no job is queued, and the official runner
+/// waits 100s for it.
+const POLL_TIMEOUT: Duration = Duration::from_secs(100);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageType {
@@ -94,11 +98,9 @@ pub enum BrokerError {
     #[error("unauthorized (401)")]
     Unauthorized,
 
-    #[error("poll timeout")]
-    Timeout,
-
-    #[error("connection error: {0}")]
-    Connection(String),
+    /// Keeps the reqwest error as its source, so `{:#}` shows why the request failed.
+    #[error("connection error")]
+    Connection(#[source] reqwest::Error),
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +142,7 @@ pub struct BrokerClient {
     server_url: String,
     session_id: String,
     token_manager: Arc<TokenManager>,
+    poll_timeout: Duration,
 }
 
 impl BrokerClient {
@@ -155,7 +158,14 @@ impl BrokerClient {
             server_url,
             session_id,
             token_manager,
+            poll_timeout: POLL_TIMEOUT,
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_poll_timeout(mut self, poll_timeout: Duration) -> Self {
+        self.poll_timeout = poll_timeout;
+        self
     }
 
     /// Create a new broker session and return a connected client.
@@ -224,6 +234,7 @@ impl BrokerClient {
             server_url: server_url.to_string(),
             session_id: session.session_id,
             token_manager,
+            poll_timeout: POLL_TIMEOUT,
         })
     }
 
@@ -247,7 +258,8 @@ impl BrokerClient {
         self.token_manager.clone()
     }
 
-    /// Single poll request. Returns Some(message) on 200, None on 202.
+    /// Single long poll request. Returns Some(message) on 200, and None on 202 or when
+    /// the long poll times out with no message, so the caller polls again at once.
     pub async fn poll_message(&self) -> Result<Option<BrokerMessage>> {
         let token = self
             .token_manager
@@ -262,21 +274,23 @@ impl BrokerClient {
             BROKER_PROTOCOL_VERSION,
         );
 
-        let resp = self
+        let resp = match self
             .client
             .get(&url)
             .bearer_auth(&token)
-            .timeout(Duration::from_secs(55))
+            .timeout(self.poll_timeout)
             .send()
             .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    BrokerError::Timeout
-                } else {
-                    BrokerError::Connection(e.to_string())
-                }
-            })
-            .context("sending poll request")?;
+        {
+            Ok(resp) => resp,
+            Err(e) if e.is_timeout() => {
+                debug!("long poll timed out with no message");
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(BrokerError::Connection(e)).context("sending poll request");
+            }
+        };
 
         let status = resp.status();
         debug!(status = %status, "poll response");

@@ -186,6 +186,45 @@ async fn poll_200_returns_message() {
     assert!(msg.body.is_some());
 }
 
+/// The broker holds `/message` open while no job is queued. When the hold outlasts
+/// the client timeout, that is an empty poll, not an error.
+#[tokio::test]
+async fn poll_held_past_timeout_returns_none() {
+    let (mock_server, tm) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/message"))
+        .respond_with(ResponseTemplate::new(202).set_delay(Duration::from_secs(2)))
+        .mount(&mock_server)
+        .await;
+    let client = make_client(&mock_server.uri(), tm).with_poll_timeout(Duration::from_millis(100));
+
+    let result = client.poll_message().await.unwrap();
+
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn poll_connection_error_keeps_its_cause() {
+    let (_mock_server, tm) = setup().await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let client = make_client(&closed_url, tm);
+
+    let err = client.poll_message().await.unwrap_err();
+
+    assert!(
+        err.downcast_ref::<BrokerError>()
+            .is_some_and(|be| matches!(be, BrokerError::Connection(_))),
+        "expected BrokerError::Connection, got: {err:#}"
+    );
+    let chain = format!("{err:#}");
+    assert!(
+        chain.starts_with("sending poll request: connection error: error sending request"),
+        "error chain should show why the request failed, got: {chain}"
+    );
+}
+
 #[tokio::test]
 async fn ack_job_posts_acknowledge() {
     let (mock_server, tm) = setup().await;
