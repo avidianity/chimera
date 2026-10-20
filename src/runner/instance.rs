@@ -573,7 +573,11 @@ impl Runner {
                         }
                     }
 
-                    warn!(error = %e, backoff_secs = backoff.as_secs(), "poll error, backing off");
+                    warn!(
+                        error = %format!("{e:#}"),
+                        backoff_secs = backoff.as_secs(),
+                        "poll error, backing off"
+                    );
 
                     tokio::select! {
                         _ = tokio::time::sleep(backoff) => {}
