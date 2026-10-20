@@ -42,7 +42,7 @@ fn make_action_step(name: &str) -> Step {
 fn make_node_metadata(main_script: &str) -> ActionMetadata {
     ActionMetadata {
         inputs: HashMap::new(),
-
+        outputs: HashMap::new(),
         runs: crate::job::action::metadata::ActionRuns {
             using: crate::job::action::metadata::ActionRuntime::Node("20".into()),
             main: Some(main_script.into()),

@@ -25,7 +25,7 @@ fn make_composite_metadata(steps_yaml: &str) -> ActionMetadata {
     let steps: Vec<serde_yaml::Value> = serde_yaml::from_str(steps_yaml).unwrap();
     ActionMetadata {
         inputs: HashMap::new(),
-
+        outputs: HashMap::new(),
         runs: ActionRuns {
             using: crate::job::action::metadata::ActionRuntime::Composite,
             main: None,
