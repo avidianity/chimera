@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use bollard::Docker;
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use bollard::models::ExecInspectResponse;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -140,12 +141,20 @@ pub async fn docker_exec(
 async fn wait_for_exit(docker: &Docker, exec_id: &str) {
     loop {
         match docker.inspect_exec(exec_id).await {
-            Ok(inspect) if inspect.running == Some(false) => return,
+            Ok(inspect) if has_exited(&inspect) => return,
             Ok(_) => {}
             Err(e) => debug!(error = %e, "inspecting docker exec failed"),
         }
         tokio::time::sleep(EXIT_POLL_INTERVAL).await;
     }
+}
+
+/// True once the exec's process has run and exited.
+///
+/// Docker reports `running: false` with no exit code in the window between
+/// `start_exec` returning and the process actually starting.
+fn has_exited(inspect: &ExecInspectResponse) -> bool {
+    inspect.running == Some(false) && inspect.exit_code.is_some()
 }
 
 #[cfg(test)]

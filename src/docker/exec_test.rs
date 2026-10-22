@@ -211,3 +211,103 @@ async fn exec_ends_when_a_background_process_holds_the_output() {
         )
         .await;
 }
+
+#[test]
+fn exec_not_yet_started_has_not_exited() {
+    let inspect = ExecInspectResponse {
+        running: Some(false),
+        exit_code: None,
+        ..Default::default()
+    };
+
+    assert!(!has_exited(&inspect));
+}
+
+#[test]
+fn running_exec_has_not_exited() {
+    let inspect = ExecInspectResponse {
+        running: Some(true),
+        exit_code: None,
+        ..Default::default()
+    };
+
+    assert!(!has_exited(&inspect));
+}
+
+#[test]
+fn stopped_exec_with_exit_code_has_exited() {
+    let inspect = ExecInspectResponse {
+        running: Some(false),
+        exit_code: Some(1),
+        ..Default::default()
+    };
+
+    assert!(has_exited(&inspect));
+}
+
+/// Integration test: a step that outlives the output drain grace keeps its full output and exit code.
+#[tokio::test]
+#[ignore]
+async fn exec_longer_than_the_drain_grace_succeeds() {
+    let docker = crate::docker::client::connect(None).unwrap();
+    crate::docker::client::ping(&docker).await.unwrap();
+    crate::docker::client::ensure_image(&docker, "alpine:latest", None)
+        .await
+        .unwrap();
+
+    let name = format!("chimera-exec-long-{}", uuid::Uuid::new_v4());
+
+    use bollard::container::{Config, CreateContainerOptions, RemoveContainerOptions};
+    let config = Config {
+        image: Some("alpine:latest"),
+        cmd: Some(vec!["tail", "-f", "/dev/null"]),
+        ..Default::default()
+    };
+    let container = docker
+        .create_container(
+            Some(CreateContainerOptions {
+                name: name.as_str(),
+                ..Default::default()
+            }),
+            config,
+        )
+        .await
+        .unwrap();
+    docker
+        .start_container::<String>(&container.id, None)
+        .await
+        .unwrap();
+
+    let masks = SecretMasker::default();
+    let (tx, _rx) = tokio::sync::mpsc::channel(256);
+    let sender = LogSender::new_for_test(tx, masks.clone());
+    let mut job_state = JobState::new(masks, HashMap::new(), serde_json::json!({}));
+
+    let result = docker_exec(
+        &docker,
+        &container.id,
+        vec!["sh".into(), "-c".into(), "sleep 4 && echo done".into()],
+        &HashMap::new(),
+        "/",
+        &mut job_state,
+        &sender,
+        Duration::from_secs(30),
+        &CancellationToken::new(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.conclusion, StepConclusion::Succeeded);
+
+    let _ = docker.stop_container(&container.id, None).await;
+    let _ = docker
+        .remove_container(
+            &container.id,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        )
+        .await;
+}
