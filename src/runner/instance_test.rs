@@ -214,47 +214,6 @@ async fn poll_loop_backoff_on_error() {
     );
 }
 
-/// A long poll that times out with no message is polled again at once. A real
-/// error would back off for at least a second first.
-#[tokio::test]
-async fn poll_loop_repolls_at_once_after_long_poll_timeout() {
-    let (mock_server, tm, shutdown_tx) = setup().await;
-    Mock::given(method("GET"))
-        .and(path("/message"))
-        .respond_with(ResponseTemplate::new(202).set_delay(Duration::from_secs(5)))
-        .up_to_n_times(1)
-        .mount(&mock_server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/message"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "messageId": 7,
-            "messageType": "RunnerJobRequest",
-            "body": "{\"runner_request_id\": \"abc\"}"
-        })))
-        .mount(&mock_server)
-        .await;
-    let broker = BrokerClient::new(
-        reqwest::Client::new(),
-        mock_server.uri(),
-        "session-123".into(),
-        tm,
-    )
-    .with_poll_timeout(Duration::from_millis(100));
-    let runner = make_runner();
-    let mut rx = shutdown_tx.subscribe();
-
-    let started = std::time::Instant::now();
-    let result = runner.poll_loop(&broker, &mut rx).await.unwrap();
-
-    assert_eq!(result.expect("should return job message").message_id, 7);
-    assert!(
-        started.elapsed() < Duration::from_millis(900),
-        "repoll waited {:?}, as if the timeout were an error",
-        started.elapsed()
-    );
-}
-
 #[tokio::test]
 async fn poll_loop_refreshes_token_on_401() {
     let (mock_server, tm, shutdown_tx) = setup().await;
@@ -269,6 +228,16 @@ async fn poll_loop_refreshes_token_on_401() {
     Mock::given(method("GET"))
         .and(path("/message"))
         .respond_with(ResponseTemplate::new(202))
+        .up_to_n_times(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/message"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messageId": 7,
+            "messageType": "RunnerJobRequest",
+            "body": "{\"runner_request_id\": \"abc\"}"
+        })))
         .mount(&mock_server)
         .await;
 
@@ -282,7 +251,34 @@ async fn poll_loop_refreshes_token_on_401() {
     let runner = make_runner();
     let mut rx = shutdown_tx.subscribe();
     let result = runner.poll_loop(&broker, &mut rx).await.unwrap();
-    assert!(result.is_none());
+
+    // An empty poll after the refresh keeps polling; it must not read as a shutdown.
+    assert_eq!(result.expect("should return job message").message_id, 7);
+}
+
+#[tokio::test]
+async fn poll_loop_fails_on_second_401_in_a_row() {
+    let (mock_server, tm, shutdown_tx) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/message"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&mock_server)
+        .await;
+    let broker = BrokerClient::new(
+        reqwest::Client::new(),
+        mock_server.uri(),
+        "session-123".into(),
+        tm,
+    );
+    let runner = make_runner();
+    let mut rx = shutdown_tx.subscribe();
+
+    let err = runner.poll_loop(&broker, &mut rx).await.unwrap_err();
+
+    assert!(matches!(
+        err.downcast_ref::<BrokerError>(),
+        Some(BrokerError::Unauthorized)
+    ));
 }
 
 #[tokio::test]

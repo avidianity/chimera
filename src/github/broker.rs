@@ -98,7 +98,6 @@ pub enum BrokerError {
     #[error("unauthorized (401)")]
     Unauthorized,
 
-    /// Keeps the reqwest error as its source, so `{:#}` shows why the request failed.
     #[error("connection error")]
     Connection(#[source] reqwest::Error),
 }
@@ -258,8 +257,7 @@ impl BrokerClient {
         self.token_manager.clone()
     }
 
-    /// Single long poll request. Returns Some(message) on 200, and None on 202 or when
-    /// the long poll times out with no message, so the caller polls again at once.
+    /// Single long poll request. Returns Some(message) on 200, None on 202.
     pub async fn poll_message(&self) -> Result<Option<BrokerMessage>> {
         let token = self
             .token_manager
@@ -274,23 +272,17 @@ impl BrokerClient {
             BROKER_PROTOCOL_VERSION,
         );
 
-        let resp = match self
+        // A timeout is an error, as in the official runner: the broker answers an idle
+        // poll well within POLL_TIMEOUT, so hitting it means the network is down.
+        let resp = self
             .client
             .get(&url)
             .bearer_auth(&token)
             .timeout(self.poll_timeout)
             .send()
             .await
-        {
-            Ok(resp) => resp,
-            Err(e) if e.is_timeout() => {
-                debug!("long poll timed out with no message");
-                return Ok(None);
-            }
-            Err(e) => {
-                return Err(BrokerError::Connection(e)).context("sending poll request");
-            }
-        };
+            .map_err(BrokerError::Connection)
+            .context("sending poll request")?;
 
         let status = resp.status();
         debug!(status = %status, "poll response");
