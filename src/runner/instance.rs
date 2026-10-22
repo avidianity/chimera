@@ -503,6 +503,7 @@ impl Runner {
     ) -> Result<Option<BrokerMessage>> {
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(30);
+        let mut token_refreshed = false;
 
         loop {
             if *shutdown_rx.borrow() {
@@ -517,6 +518,10 @@ impl Runner {
                     return Ok(None);
                 }
             };
+
+            if poll_result.is_ok() {
+                token_refreshed = false;
+            }
 
             match poll_result {
                 Ok(Some(msg)) => {
@@ -555,22 +560,14 @@ impl Runner {
                     if e.downcast_ref::<BrokerError>()
                         .is_some_and(|be| matches!(be, BrokerError::Unauthorized))
                     {
+                        if token_refreshed {
+                            warn!("got 401 again after refreshing the token");
+                            return Err(e);
+                        }
                         warn!("got 401, refreshing token");
                         broker.token_manager().invalidate().await;
-                        let retry = tokio::select! {
-                            result = broker.poll_message() => result,
-                            _ = shutdown_rx.changed() => {
-                                info!("shutdown signal received during token retry");
-                                return Ok(None);
-                            }
-                        };
-                        match retry {
-                            Ok(result) => return Ok(result),
-                            Err(retry_err) => {
-                                warn!(error = %retry_err, "retry after token refresh also failed");
-                                return Err(retry_err);
-                            }
-                        }
+                        token_refreshed = true;
+                        continue;
                     }
 
                     warn!(
